@@ -98,6 +98,29 @@ describe("FoscamCameraPlugin", () => {
     await plugin.stop();
   });
 
+  it("updateDeviceData's sourceDeviceId matches the registered friendlyName (regression, live 2026-08-13)", async () => {
+    // upsertFromDiscovery keys the device by `friendlyName` — a mismatch
+    // with the sourceDeviceId used in updateDeviceData silently orphans
+    // every poll update from the registered device (found live: data stayed
+    // null forever despite polling successfully).
+    const { deps, upsertCalls, updateCalls } = makeDeps(fullSettings());
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => devStateResponse(0)),
+    );
+
+    const plugin = createPlugin(deps);
+    await plugin.start();
+
+    const friendlyName = (upsertCalls[0][2] as { friendlyName: string }).friendlyName;
+    expect(updateCalls.length).toBeGreaterThan(0);
+    for (const [, sourceDeviceId] of updateCalls) {
+      expect(sourceDeviceId).toBe(friendlyName);
+    }
+
+    await plugin.stop();
+  });
+
   it("emits camera_detection once on a motion rising edge, not on repeated polls", async () => {
     const { deps, updateCalls } = makeDeps(fullSettings());
     let alarm: 0 | 1 = 0;

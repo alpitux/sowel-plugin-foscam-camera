@@ -2,7 +2,7 @@
   "id": "foscam_camera",
   "type": "integration",
   "name": "Foscam Camera",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Foscam CGI-API cameras (FI9805E) — snapshot, MJPEG live view, motion detection",
   "icon": "Camera",
   "repo": "alpitux/sowel-plugin-foscam-camera",

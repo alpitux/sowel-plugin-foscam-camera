@@ -119,8 +119,13 @@ interface IntegrationPlugin {
 const INTEGRATION_ID = "foscam_camera";
 const SETTINGS_PREFIX = `integration.${INTEGRATION_ID}.`;
 // v1 is a single-camera plugin (no cloud discovery, unlike Netatmo) — one
-// fixed source device id is enough.
-const SOURCE_DEVICE_ID = "camera";
+// fixed friendlyName is enough. deviceManager.upsertFromDiscovery keys the
+// device by `friendlyName` (becomes its sourceDeviceId), so this constant
+// must be the single source of truth for both registerDevice() and every
+// updateDeviceData() call — a mismatch here silently orphans poll updates
+// from the registered device (confirmed live 2026-08-13: a bug here left
+// snapshot_url/stream_url/detection stuck at null despite polling fine).
+const DEVICE_NAME = "Foscam Camera";
 const DEFAULT_PORT = 88;
 const DEFAULT_POLL_INTERVAL_S = 15;
 const MIN_POLL_INTERVAL_S = 5;
@@ -268,7 +273,7 @@ class FoscamCameraPlugin implements IntegrationPlugin {
     // what tells Sowel's media-proxy and CameraPanel.tsx to skip the
     // HLS-manifest path for this stream.
     const discovered: DiscoveredDevice = {
-      friendlyName: "Foscam Camera",
+      friendlyName: DEVICE_NAME,
       manufacturer: "Foscam",
       model: "FI9805E",
       data: [
@@ -302,7 +307,7 @@ class FoscamCameraPlugin implements IntegrationPlugin {
       }
       this.lastMotionAlarm = state.motionDetectAlarm;
 
-      this.deviceManager.updateDeviceData(INTEGRATION_ID, SOURCE_DEVICE_ID, payload);
+      this.deviceManager.updateDeviceData(INTEGRATION_ID, DEVICE_NAME, payload);
 
       if (this.pollFailed) {
         this.pollFailed = false;
