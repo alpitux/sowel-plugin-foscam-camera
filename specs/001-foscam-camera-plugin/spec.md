@@ -48,6 +48,22 @@ against blindly**, same discipline as the Netatmo spec.
 
 ## Feasibility risk — read before approving this spec
 
+> **Decision (2026-08-12, Romain): MJPEG fallback for v1.** Option 1 below
+> is the chosen path. Rationale: it stays within a single plugin's scope
+> (only a small, additive `spec 133` UI follow-up needed, not a new core
+> infrastructure dependency), whereas option 2 (RTSP-to-HLS transcoding)
+> would require Sowel to gain a capability it has never had (supervising a
+> server-side child process/sidecar) for a quality gain that isn't
+> confirmed on this specific unit — live testing hadn't yet measured
+> either stream's real-world quality when the call was made. RTSP-to-HLS
+> remains a possible future initiative if the need generalizes across
+> camera plugins (e.g. a future Eufy plugin with the same constraint), but
+> is out of scope for this plugin's v1. This unblocks moving past the spec
+> stage, but the spec 133 UI follow-up PR to `mchacher/sowel` (see option
+> 1 below) still needs to be proposed and merged before this plugin's live
+> view can actually ship — see "Next steps" implications in
+> `CONTEXT_ROMAIN.md`.
+
 The FI9805E's native live video is **RTSP** (H.264 over RTSP, port 88 by
 default). It does **not** serve HLS the way Netatmo's cameras do. Spec
 133's media-proxy (`src/api/routes/camera.ts`, `GET
@@ -170,15 +186,30 @@ RTSP feed's actual resolution compared to the 640×480 snapshot.
 
 ## Acceptance Criteria
 
-*Deliberately left unfinalized until the "Feasibility risk" above is
-resolved with Romain — committing to concrete criteria before that
-decision would risk locking in a scope built on an untested assumption
-about live view.* Once resolved, this section should cover (at minimum,
-mirroring the Netatmo spec's structure): snapshot fetchable end-to-end
-through Sowel's media-proxy, live view working through whichever path is
-chosen, motion detection surfaced as `camera_detection` without duplicate
-events, and the registry entry with `sha256` + `owner` once a release
-exists.
+Finalized 2026-08-12 following the MJPEG-for-v1 decision (see "Feasibility
+risk"):
+
+1. `camera_snapshot_url` fetchable end-to-end through Sowel's media-proxy
+   (`GET /api/v1/equipments/:id/camera/snapshot`), backed by `snapPicture2`.
+2. `camera_stream_url` live view works through the MJPEG path
+   (`CGIStream.cgi?cmd=GetMJStream`) — **contingent on the spec 133 UI
+   follow-up PR to `mchacher/sowel` being proposed, reviewed, and merged
+   first**, since `CameraPanel.tsx` cannot currently render MJPEG. This
+   plugin cannot ship a working live view before that PR lands upstream.
+3. `camera_detection` surfaced via `getDevState` polling of
+   `motionDetectAlarm`, with edge/level de-duplication (no repeat emission
+   while the flag stays `true` across polls) — confirmed feasible with the
+   dedicated plugin account's privilege level (no `getMotionDetectConfig1`
+   access needed for this).
+4. `camera_light_mode`/`trigger_camera_siren`: **not emitted** for this
+   device — no visible light or siren hardware exists (see "Non-Goals").
+   Whether `setInfraLedConfig` is worth mapping to `camera_light_mode`
+   despite the infrared/visible-light semantic mismatch remains an open
+   design call, not a blocker for v1 (`camera_light_mode` binding is
+   optional per spec 133's binding-gated principle).
+5. Registry entry with `sha256` + `owner: "alpitux"` present once a
+   GitHub release exists, computed via
+   `scripts/backfill-registry-sha256.mjs` in the `sowel` repo.
 
 ## Test plan
 
@@ -201,12 +232,10 @@ Same split as the Netatmo plugin:
 
 ## Open questions (to resolve during Phase 1.3 live testing, not blocking spec approval — except #1)
 
-1. **MJPEG vs RTSP-to-HLS** (see "Feasibility risk") — this one *does*
-   block moving past the spec stage; the rest below don't. **Still open**
-   — live testing confirmed both paths are technically reachable
-   (`CGIStream.cgi?cmd=GetMJStream` for MJPEG, RTSP live on port 88), but
-   the choice itself is still Romain's to make, see "Live API test
-   results".
+1. ~~**MJPEG vs RTSP-to-HLS**~~ — **resolved 2026-08-12**: MJPEG fallback
+   chosen for v1 (see "Feasibility risk" decision note). The remaining
+   dependency is the spec 133 UI follow-up PR needed to display an MJPEG
+   stream at all, not yet proposed to `mchacher/sowel`.
 2. ~~Exact CGI auth requirement per command~~ — **partially resolved**:
    the dedicated non-admin account is sufficient for `getDevState`,
    `snapPicture2`, `getInfraLedConfig`, but **not** for
