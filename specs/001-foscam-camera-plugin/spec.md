@@ -38,7 +38,7 @@ against blindly**, same discipline as the Netatmo spec.
 | Auth | Query-string: `usr=<user>&pwd=<pass>` (newer `CGIProxy.fcgi` commands) or `user=<user>&pwd=<pass>` (legacy `.cgi` commands) | No OAuth, no cloud. Credentials travel in the URL over plain HTTP by default — a real handling concern (see "Non-Goals" and the security note below), unlike Netatmo's bearer-token OAuth flow. |
 | Snapshot | `GET http://<ip>:<port>/cgi-bin/CGIProxy.fcgi?cmd=snapPicture2&usr=...&pwd=...` | Returns a JPEG (reported up to 1920×1080 in some sources, but the FI9805E's sensor tops out at 1280×720 per its spec sheet — resolution to confirm live). Feeds `camera_snapshot_url` directly; a plain HTTP JPEG GET, no local/remote URL resolution dance needed (unlike Netatmo's `vpn_url`/`local_url`/ping flow). |
 | Live stream (RTSP, native) | `rtsp://<usr>:<pwd>@<ip>:88/videoMain` (full res) or `/videoSub` (lower-res substream) | **Not HTTP, not HLS.** See "Feasibility risk" below — this is the central open question for this plugin. |
-| Live stream (MJPEG, HTTP fallback) | `GET http://<ip>/videostream.asf?user=...&pwd=...&resolution=WxH` (multipart MJPEG) | Directly HTTP-fetchable, no RTSP client needed. Candidate v1 fallback for `camera_stream_url` — see "Feasibility risk". |
+| Live stream (MJPEG, HTTP fallback) | ~~`GET http://<ip>/videostream.asf?user=...&pwd=...`~~ **corrected by live test**: `GET http://<ip>:88/cgi-bin/CGIStream.cgi?cmd=GetMJStream&usr=...&pwd=...` (multipart MJPEG) | Directly HTTP-fetchable, no RTSP client needed. Candidate v1 fallback for `camera_stream_url` — see "Feasibility risk". The `videostream.asf`/`.cgi` endpoints from the original research return 404 on this firmware; `CGIStream.cgi?cmd=GetMJStream` is what actually works — see "Live API test results". |
 | Device/motion state | `GET .../CGIProxy.fcgi?cmd=getDevState&usr=...&pwd=...` | Returns `motionDetectAlarm`, `soundAlarm`, `record`, `sdState`, `sdFreeSpace`, `ntpState`, etc. Polling target for `camera_detection`, analogous to Netatmo's `homestatus` polling. |
 | Motion detect config | `getMotionDetectConfig` / `setMotionDetectConfig` (`isEnable`, `snapInterval`, `sensitivity`, per-zone linkage) | Controls whether/how sensitively `motionDetectAlarm` fires. Whether this plugin exposes sensitivity as a setting or just enables detection with the camera's existing config is a spec decision, not yet made. |
 | Alarm HTTP push (firmware-dependent) | `GET .../set_alarm.cgi?http=1&http_url=<callback>` (legacy command set, separate from `CGIProxy.fcgi`) | Community reports (Domoticz/HomeSeer forums) say **newer Foscam firmware generations dropped this**. Unconfirmed whether the FI9805E's actual firmware on Romain's unit still has it. If present, this would give near-real-time `camera_detection` updates via a LAN-only push instead of polling `getDevState` — **first thing to check live**, since it changes the plugin's core polling architecture. |
@@ -115,6 +115,59 @@ Needed from Romain before any live API testing can start:
    the legacy `set_alarm.cgi` HTTP push command set is still present
    (community reports say it was dropped on newer firmware generations).
 
+## Live API test results (2026-08-12)
+
+Tested against Romain's real FI9805E unit — a test camera on `192.168.20.x`
+(LAN-only, camera name withheld per anonymization rule), reached via the
+Sowel dev VM on `192.168.10.x` (the machine running this session has no
+direct route to the camera's subnet, so tests were run over SSH from the
+dev VM). All requests used `CGIProxy.fcgi` query-string auth
+(`usr=<user>&pwd=<pass>`) with a dedicated, non-admin plugin account.
+
+- **Auth**: confirmed working — `getDevState`, `getDevInfo`,
+  `snapPicture2`, and `getInfraLedConfig` all returned `result=0` / HTTP
+  200 with the dedicated account.
+- **Firmware confirmed**: `2.14.1.119` (hardware `1.4.1.10`). This
+  generation does **not** have the legacy `set_alarm.cgi` HTTP push
+  endpoint (`404 Not Found`) — resolves open question #3: `getDevState`
+  polling is the only detection path available on this unit, no push
+  option.
+- **Snapshot** (`snapPicture2`): valid JPEG, **640×480**, ~27.6 KB, ~110ms
+  response time — lower than the FI9805E's spec-sheet-quoted 720p sensor
+  resolution. Partially resolves open question #5: default `snapPicture2`
+  output is 640×480 on this unit; whether a resolution query param can
+  raise this is still to check.
+- **Live stream, RTSP**: confirmed live and speaking RTSP on **port 88**
+  (not a separate port) — a raw `OPTIONS` request returns `RTSP/1.0 200
+  OK` advertising `DESCRIBE, SETUP, TEARDOWN, PLAY, PAUSE, GET_PARAMETER,
+  SET_PARAMETER`. Resolves open question #4 for the RTSP port. Note:
+  `curl`'s built-in RTSP client failed ("Empty reply from server") against
+  this camera — a known `curl` RTSP-client limitation, not a camera issue;
+  a raw-socket `OPTIONS` request succeeded. Full `DESCRIBE`/`SETUP`/`PLAY`
+  handshake not yet exercised — needs `ffprobe`/`ffmpeg` or an equivalent
+  RTSP-capable client, not currently installed on the dev VM.
+- **Live stream, MJPEG fallback**: the legacy endpoints from the original
+  research (`videostream.asf`, `videostream.cgi`) both return **404** on
+  this firmware. The `CGIProxy`-family endpoint
+  **`CGIStream.cgi?cmd=GetMJStream`** returns **HTTP 200** — this is the
+  real MJPEG fallback candidate on this firmware generation (table above
+  corrected accordingly).
+- **Motion detect config**: `getMotionDetectConfig1` returned `result=-3`
+  (access denied) with the dedicated plugin account — this account does
+  **not** have privilege to read/write motion detection config, unlike
+  `getDevState`/`snapPicture2`/`getInfraLedConfig` which all succeed.
+  Partially resolves open question #2: the restricted account is
+  sufficient for state/snapshot/IR reads but not for motion config —
+  still open whether polling `getDevState`'s `motionDetectAlarm` field
+  (which doesn't require this privilege) is enough for `camera_detection`,
+  or whether admin credentials are needed for full motion feature support.
+- **IR/night vision** (`getInfraLedConfig`): works with the dedicated
+  account, returned `mode=0` (auto).
+
+**Still open / not yet tested**: full RTSP `DESCRIBE`/`SETUP`/`PLAY`
+handshake, actual MJPEG framerate/quality via `CGIStream.cgi`, and the
+RTSP feed's actual resolution compared to the 640×480 snapshot.
+
 ## Acceptance Criteria
 
 *Deliberately left unfinalized until the "Feasibility risk" above is
@@ -149,16 +202,29 @@ Same split as the Netatmo plugin:
 ## Open questions (to resolve during Phase 1.3 live testing, not blocking spec approval — except #1)
 
 1. **MJPEG vs RTSP-to-HLS** (see "Feasibility risk") — this one *does*
-   block moving past the spec stage; the rest below don't.
-2. Exact CGI auth requirement per command — visitor account sufficient, or
-   admin required?
-3. Whether `set_alarm.cgi` HTTP push is present on this unit's firmware,
-   or `getDevState` polling is the only detection path available.
-4. Actual HTTP/RTSP ports on Romain's unit — don't assume 88 for both,
-   confirm against the camera's own config.
-5. Snapshot resolution/quality vs the RTSP feed's resolution — whether
-   `snapPicture2` visibly degrades compared to what the live view (once
-   decided) will show.
+   block moving past the spec stage; the rest below don't. **Still open**
+   — live testing confirmed both paths are technically reachable
+   (`CGIStream.cgi?cmd=GetMJStream` for MJPEG, RTSP live on port 88), but
+   the choice itself is still Romain's to make, see "Live API test
+   results".
+2. ~~Exact CGI auth requirement per command~~ — **partially resolved**:
+   the dedicated non-admin account is sufficient for `getDevState`,
+   `snapPicture2`, `getInfraLedConfig`, but **not** for
+   `getMotionDetectConfig1` (access denied). Whether admin is needed for
+   full motion feature support is still open — see "Live API test
+   results".
+3. ~~Whether `set_alarm.cgi` HTTP push is present~~ — **resolved**: no,
+   404 on this firmware (`2.14.1.119`). `getDevState` polling is the only
+   detection path.
+4. ~~Actual HTTP/RTSP ports~~ — **resolved**: both HTTP CGI and RTSP are
+   on port 88 (no separate RTSP port on this unit).
+5. Snapshot resolution/quality vs the RTSP feed's resolution — **partially
+   resolved**: `snapPicture2` defaults to 640×480 on this unit (below the
+   sensor's spec-sheet 720p). Whether a resolution query param raises
+   this, and how it compares to the RTSP feed's actual resolution, is
+   still open (RTSP handshake not yet tested).
 6. Whether `setInfraLedConfig` exists and is meaningful to expose as
    `camera_light_mode`, given the semantic mismatch flagged above
-   (infrared vs visible light).
+   (infrared vs visible light). **Still open** — only `getInfraLedConfig`
+   was read-tested so far (`mode=0`/auto), `setInfraLedConfig` not yet
+   exercised.
