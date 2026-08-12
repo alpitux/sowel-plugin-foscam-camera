@@ -1,0 +1,48 @@
+{
+  "id": "foscam_camera",
+  "type": "integration",
+  "name": "Foscam Camera",
+  "version": "1.0.0",
+  "description": "Foscam CGI-API cameras (FI9805E) — snapshot, MJPEG live view, motion detection",
+  "icon": "Camera",
+  "repo": "alpitux/sowel-plugin-foscam-camera",
+  "author": "alpitux",
+  "sowelVersion": ">=1.31.0",
+  "settings": [
+    {
+      "key": "ip",
+      "label": "Camera IP",
+      "type": "text",
+      "required": true,
+      "placeholder": "192.168.1.x"
+    },
+    {
+      "key": "port",
+      "label": "HTTP port",
+      "type": "number",
+      "required": false,
+      "defaultValue": "88"
+    },
+    {
+      "key": "username",
+      "label": "Username",
+      "type": "text",
+      "required": true
+    },
+    {
+      "key": "password",
+      "label": "Password",
+      "type": "password",
+      "required": true
+    },
+    {
+      "key": "polling_interval",
+      "label": "Polling interval (seconds)",
+      "type": "number",
+      "required": false,
+      "defaultValue": "15",
+      "placeholder": "Min 5, default 15"
+    }
+  ],
+  "apiVersion": 2
+}
