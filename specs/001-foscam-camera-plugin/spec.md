@@ -37,8 +37,8 @@ against blindly**, same discipline as the Netatmo spec.
 |---|---|---|
 | Auth | Query-string: `usr=<user>&pwd=<pass>` (newer `CGIProxy.fcgi` commands) or `user=<user>&pwd=<pass>` (legacy `.cgi` commands) | No OAuth, no cloud. Credentials travel in the URL over plain HTTP by default — a real handling concern (see "Non-Goals" and the security note below), unlike Netatmo's bearer-token OAuth flow. |
 | Snapshot | `GET http://<ip>:<port>/cgi-bin/CGIProxy.fcgi?cmd=snapPicture2&usr=...&pwd=...` | Returns a JPEG (reported up to 1920×1080 in some sources, but the FI9805E's sensor tops out at 1280×720 per its spec sheet — resolution to confirm live). Feeds `camera_snapshot_url` directly; a plain HTTP JPEG GET, no local/remote URL resolution dance needed (unlike Netatmo's `vpn_url`/`local_url`/ping flow). |
-| Live stream (RTSP, native) | `rtsp://<usr>:<pwd>@<ip>:88/videoMain` (full res) or `/videoSub` (lower-res substream) | **Not HTTP, not HLS.** See "Feasibility risk" below — this is the central open question for this plugin. |
-| Live stream (MJPEG, HTTP fallback) | ~~`GET http://<ip>/videostream.asf?user=...&pwd=...`~~ **corrected by live test**: `GET http://<ip>:88/cgi-bin/CGIStream.cgi?cmd=GetMJStream&usr=...&pwd=...` (multipart MJPEG) | Directly HTTP-fetchable, no RTSP client needed. Candidate v1 fallback for `camera_stream_url` — see "Feasibility risk". The `videostream.asf`/`.cgi` endpoints from the original research return 404 on this firmware; `CGIStream.cgi?cmd=GetMJStream` is what actually works — see "Live API test results". |
+| Live stream (RTSP, native) | `rtsp://<usr>:<pwd>@<ip>:88/videoMain` (full res) or `/videoSub` (lower-res substream) | **Not HTTP, not HLS** — needs a Sowel-side transcode/relay, see "Feasibility risk" below. **Confirmed fully functional 2026-08-14**: Digest auth (not query-string), full `DESCRIBE`/`SETUP`/`PLAY` handshake verified with `ffmpeg`, real H.264 (640×480) + PCM μ-law audio, a decoded frame visually confirmed. Now the more promising path than MJPEG (confirmed broken) — see "Live API test results (2026-08-14)". |
+| Live stream (MJPEG, HTTP fallback) | `GET http://<ip>:88/cgi-bin/CGIStream.cgi?cmd=GetMJStream&usr=...&pwd=...` (multipart MJPEG) | **Non-functional on Romain's unit (confirmed 2026-08-14)** — returns HTTP 200 with the right Content-Type, but the body is always a fixed "No MJ stream" error, never image data, even after applying the documented fix (`setSubStreamFormat&format=1`). Likely a hardware/firmware limitation of this specific unit. See "Live API test results (2026-08-14)". |
 | Device/motion state | `GET .../CGIProxy.fcgi?cmd=getDevState&usr=...&pwd=...` | Returns `motionDetectAlarm`, `soundAlarm`, `record`, `sdState`, `sdFreeSpace`, `ntpState`, etc. Polling target for `camera_detection`, analogous to Netatmo's `homestatus` polling. |
 | Motion detect config | `getMotionDetectConfig` / `setMotionDetectConfig` (`isEnable`, `snapInterval`, `sensitivity`, per-zone linkage) | Controls whether/how sensitively `motionDetectAlarm` fires. Whether this plugin exposes sensitivity as a setting or just enables detection with the camera's existing config is a spec decision, not yet made. |
 | Alarm HTTP push (firmware-dependent) | `GET .../set_alarm.cgi?http=1&http_url=<callback>` (legacy command set, separate from `CGIProxy.fcgi`) | Community reports (Domoticz/HomeSeer forums) say **newer Foscam firmware generations dropped this**. Unconfirmed whether the FI9805E's actual firmware on Romain's unit still has it. If present, this would give near-real-time `camera_detection` updates via a LAN-only push instead of polling `getDevState` — **first thing to check live**, since it changes the plugin's core polling architecture. |
@@ -48,7 +48,20 @@ against blindly**, same discipline as the Netatmo spec.
 
 ## Feasibility risk — read before approving this spec
 
-> **Decision (2026-08-12, Romain): MJPEG fallback for v1.** Option 1 below
+> **⚠️ Decision REOPENED (2026-08-14).** The MJPEG decision below was made
+> on an incomplete test: the 2026-08-12 "Live API test results" only
+> checked HTTP status/Content-Type for `CGIStream.cgi?cmd=GetMJStream`,
+> never the actual response body. On 2026-08-14, testing the real
+> media-proxy end-to-end (see "Live API test results (2026-08-14)" below)
+> revealed the stream body is always a fixed error message, not image
+> data — **MJPEG does not actually work on this unit**. Meanwhile, a full
+> RTSP `DESCRIBE`/`SETUP`/`PLAY` handshake was confirmed to work
+> perfectly, with a verified real decoded video frame. The premise behind
+> choosing MJPEG ("cheap path that works") no longer holds. Decision
+> pending with Romain — see the 2026-08-14 section below before reading
+> the (now superseded) rationale that follows.
+
+> **Decision (2026-08-12, Romain, SUPERSEDED — see above): MJPEG fallback for v1.** Option 1 below
 > is the chosen path. Rationale: it stays within a single plugin's scope
 > (only a small, additive `spec 133` UI follow-up needed, not a new core
 > infrastructure dependency), whereas option 2 (RTSP-to-HLS transcoding)
@@ -184,7 +197,96 @@ dev VM). All requests used `CGIProxy.fcgi` query-string auth
 handshake, actual MJPEG framerate/quality via `CGIStream.cgi`, and the
 RTSP feed's actual resolution compared to the 640×480 snapshot.
 
+## Live API test results (2026-08-14) — MJPEG failure & RTSP confirmation
+
+Follow-up testing after the plugin (v1.0.1) and a local, not-yet-pushed
+core `sowel` patch (MJPEG support in the media-proxy/`CameraPanel.tsx`)
+were deployed to the dev VM and exercised end-to-end through Sowel's real
+media-proxy routes, not just direct camera CGI calls as in the 2026-08-12
+section above.
+
+- **Snapshot end-to-end**: confirmed working through
+  `GET /api/v1/equipments/:id/camera/snapshot` — valid JPEG, 640×480, HTTP
+  200. No issues.
+- **MJPEG stream — corrects the 2026-08-12 finding.** That earlier test
+  only checked HTTP status (200) and `Content-Type`
+  (`multipart/x-mixed-replace`) for `CGIStream.cgi?cmd=GetMJStream`, never
+  the actual response body. Testing the real stream end-to-end (through
+  Sowel's media-proxy, and independently via a raw-socket byte inspection
+  directly against the camera) shows the body is **always** a fixed
+  128-byte message, not image data:
+  ```
+  --ThisString
+  Content-type:text/plain;
+
+  No MJ stream
+  ```
+  This is stable and reproducible across repeated attempts.
+  - The documented fix (Foscam CGI guide: set the sub-stream format to
+    MJPEG via `CGIProxy.fcgi?cmd=setSubStreamFormat&format=1`, officially
+    requiring admin privilege) was tried — the dedicated plugin account
+    unexpectedly succeeded (`result=0`), including forcing an explicit
+    0→1 transition with waits up to 8s between attempts. **No observable
+    effect** on `GetMJStream` — still "No MJ stream" every time.
+  - A reboot attempt (`cmd=reboot`, sometimes needed for a codec/encoder
+    setting to take effect) was blocked: `reboot` requires admin
+    privilege, the dedicated plugin account gets `result=-3` (access
+    denied). Romain confirmed (2026-08-14) no admin credentials are
+    available for this camera beyond the dedicated plugin account.
+  - Most likely explanation: a genuine hardware/firmware limitation of
+    this specific FI9805E unit. Foscam's CGI guide is shared across many
+    camera SKUs/generations — not every documented command is necessarily
+    backed by real hardware capability on every model.
+- **RTSP — fully confirmed working**. Romain pointed out that his Synology
+  NAS's Surveillance Station successfully streams this same camera — that
+  lead (very likely RTSP, the standard protocol for this class of NVR/VMS
+  software) is what prompted re-testing RTSP properly instead of treating
+  it as a dead end. Full protocol validation, not just the `OPTIONS` probe from
+  2026-08-12:
+  - RTSP `DESCRIBE` requires **Digest** authentication (realm `"Foscam
+    IPCam Living Video"`), distinct from the CGI endpoints' query-string
+    `usr`/`pwd` auth. A hand-computed digest response (MD5, no `qop`)
+    succeeded on the first authenticated attempt, returning a valid SDP:
+    H.264 video track (`Baseline` profile, 640×480) + a PCM μ-law audio
+    track, served by an embedded `LIVE555` server.
+  - Full `ffmpeg`-based handshake (`DESCRIBE`/`SETUP`/`PLAY` over TCP
+    transport, run via an ephemeral Docker container on the dev VM — no
+    system package installs) succeeded end-to-end: real H.264 stream,
+    `640x480, 3.33 tbr` (a low but real framerate — a genuine
+    characteristic of this camera's encoder config, not a test artifact),
+    plus the audio track. One frame was decoded and saved as JPEG, then
+    visually verified: a clear, correctly-exposed IR night-vision image
+    with the camera's own on-screen timestamp overlay — unambiguous proof
+    of a working, real live feed. (The captured frame itself was deleted
+    after verification — it had the camera's device name burned into the
+    OSD overlay, treated as sensitive per the anonymization rule.)
+  - **Separate, secondary finding**: Node's native `fetch` (the same
+    client Sowel's `src/api/routes/camera.ts` uses for HTTP media
+    proxying) rejected this camera's plain-HTTP MJPEG response with
+    `TypeError: fetch failed... Invalid header value char` even when
+    testing on a firmware/config state where data was expected — `curl`
+    and a raw socket accepted the identical response without issue. Not
+    yet root-caused. Moot for now given MJPEG doesn't produce real data
+    regardless, but would matter again if MJPEG is ever revisited (e.g. on
+    a different Foscam unit where it actually works), and is unrelated to
+    the RTSP path (RTSP wouldn't go through Sowel's `fetch`-based
+    media-proxy in its current form at all — it has no RTSP client, see
+    "Feasibility risk").
+
+**Net effect on the Feasibility risk decision**: the MJPEG path is
+confirmed non-functional on Romain's actual hardware, independent of
+implementation effort — no plugin-side or Sowel-core code change can fix
+a camera-side firmware limitation. RTSP is confirmed fully functional.
+This reopens the MJPEG-vs-RTSP→HLS choice — see the decision note at the
+top of "Feasibility risk" above. Decision **pending** as of 2026-08-14.
+
 ## Acceptance Criteria
+
+> **⚠️ Written under the 2026-08-12 MJPEG decision, now reopened (see
+> "Feasibility risk" and "Live API test results (2026-08-14)" above).**
+> Criterion #2 below assumes the MJPEG path and needs to be rewritten once
+> Romain decides how to proceed — left as-is here for the historical
+> record, not to be treated as current until that decision is made.
 
 Finalized 2026-08-12 following the MJPEG-for-v1 decision (see "Feasibility
 risk"):
@@ -232,10 +334,13 @@ Same split as the Netatmo plugin:
 
 ## Open questions (to resolve during Phase 1.3 live testing, not blocking spec approval — except #1)
 
-1. ~~**MJPEG vs RTSP-to-HLS**~~ — **resolved 2026-08-12**: MJPEG fallback
-   chosen for v1 (see "Feasibility risk" decision note). The remaining
-   dependency is the spec 133 UI follow-up PR needed to display an MJPEG
-   stream at all, not yet proposed to `mchacher/sowel`.
+1. **MJPEG vs RTSP-to-HLS** — ~~resolved 2026-08-12 (MJPEG)~~ **REOPENED
+   2026-08-14**: MJPEG confirmed non-functional on Romain's actual
+   hardware (returns a fixed "No MJ stream" error body regardless of
+   config), RTSP confirmed fully functional (real H.264 + audio, verified
+   frame). See "Live API test results (2026-08-14)" above. This one still
+   *does* block moving to implementation of the live-view feature —
+   decision pending with Romain.
 2. ~~Exact CGI auth requirement per command~~ — **partially resolved**:
    the dedicated non-admin account is sufficient for `getDevState`,
    `snapPicture2`, `getInfraLedConfig`, but **not** for
