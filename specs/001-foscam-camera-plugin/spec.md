@@ -48,20 +48,21 @@ against blindly**, same discipline as the Netatmo spec.
 
 ## Feasibility risk — read before approving this spec
 
-> **⚠️ Decision REOPENED (2026-08-14).** The MJPEG decision below was made
-> on an incomplete test: the 2026-08-12 "Live API test results" only
-> checked HTTP status/Content-Type for `CGIStream.cgi?cmd=GetMJStream`,
-> never the actual response body. On 2026-08-14, testing the real
-> media-proxy end-to-end (see "Live API test results (2026-08-14)" below)
-> revealed the stream body is always a fixed error message, not image
-> data — **MJPEG does not actually work on this unit**. Meanwhile, a full
-> RTSP `DESCRIBE`/`SETUP`/`PLAY` handshake was confirmed to work
-> perfectly, with a verified real decoded video frame. The premise behind
-> choosing MJPEG ("cheap path that works") no longer holds. Decision
-> pending with Romain — see the 2026-08-14 section below before reading
-> the (now superseded) rationale that follows.
+> **Decision (2026-08-15, Romain): RTSP-to-HLS relay for v1, superseding
+> MJPEG.** MJPEG is confirmed dead on Romain's actual hardware (see "Live
+> API test results (2026-08-14)") — not a matter of implementation effort,
+> a real firmware/hardware limitation. RTSP is confirmed fully functional.
+> Rather than shipping v1 without a live view, Romain chose to invest in
+> the RTSP-to-HLS path now: prototype a lightweight relay (`go2rtc` —
+> remuxes RTSP into HLS without re-encoding when the codec allows it,
+> which it does here: H.264 baseline) locally against `sowel`, validate it
+> actually works end-to-end, **then** propose the underlying capability
+> (Sowel supervising a sidecar process) to Marc. This is a bigger,
+> cross-repo lift than the MJPEG path would have been — accepted
+> knowingly, not a "cheap path" decision this time. See "RTSP-to-HLS relay
+> prototype" below for the plan and progress.
 
-> **Decision (2026-08-12, Romain, SUPERSEDED — see above): MJPEG fallback for v1.** Option 1 below
+> **Decision (2026-08-12, Romain, SUPERSEDED 2026-08-15 — see above): MJPEG fallback for v1.** Option 1 below
 > is the chosen path. Rationale: it stays within a single plugin's scope
 > (only a small, additive `spec 133` UI follow-up needed, not a new core
 > infrastructure dependency), whereas option 2 (RTSP-to-HLS transcoding)
@@ -110,6 +111,40 @@ either Romain accepts an MJPEG-only v1 pending a small spec 133 UI
 follow-up, or the RTSP path gets scoped separately as its own initiative
 (likely too big for "just a plugin"). `camera_snapshot_url` has no such
 blocker — it's a plain JPEG GET, same shape as Netatmo's.
+
+*(Superseded 2026-08-15 — see the decision note at the top of this
+section and "RTSP-to-HLS relay prototype" below.)*
+
+## RTSP-to-HLS relay prototype (2026-08-15, in progress)
+
+Plan for validating option 2 above before proposing the underlying
+capability to Marc:
+
+1. Run `go2rtc` as a sidecar (Docker container to start, for local
+   prototyping on the dev VM — not a production packaging decision yet)
+   pointed at the camera's RTSP URL (`rtsp://<usr>:<pwd>@<ip>:88/videoMain`,
+   confirmed working 2026-08-14).
+2. `go2rtc` remuxes H.264 RTSP into HLS **without re-encoding** (the
+   FI9805E's stream is already H.264 baseline, a codec HLS supports
+   natively — this avoids the CPU cost of a full transcode, unlike a
+   generic `ffmpeg -c:v libx264` pipeline).
+3. Point this plugin's `camera_stream_url` at `go2rtc`'s local HLS
+   endpoint (e.g. `http://127.0.0.1:1984/api/stream.m3u8?src=...`) instead
+   of a direct camera URL.
+4. **Key simplification over the MJPEG path**: if `go2rtc` serves genuine
+   HLS (`#EXTM3U` manifest), Sowel's *existing, unmodified*
+   `src/api/routes/camera.ts` should proxy it correctly — no `unit:
+   "mjpeg"` signal, no auth-middleware query-token exception, no
+   `CameraPanel.tsx` `<img>` branch needed. Those local, not-yet-pushed
+   patches from the MJPEG attempt become unnecessary if this holds; to be
+   confirmed once tested.
+5. The only genuinely new capability needed is Sowel supervising the
+   `go2rtc` process itself (start/stop/health lifecycle) — this is what
+   would need Marc's buy-in as a core change, not the HLS-serving part
+   (already supported).
+
+**Not yet done**: none of the steps above have been executed yet — this
+section records the plan agreed with Romain on 2026-08-15, not results.
 
 ## Non-Goals
 
@@ -334,13 +369,13 @@ Same split as the Netatmo plugin:
 
 ## Open questions (to resolve during Phase 1.3 live testing, not blocking spec approval — except #1)
 
-1. **MJPEG vs RTSP-to-HLS** — ~~resolved 2026-08-12 (MJPEG)~~ **REOPENED
-   2026-08-14**: MJPEG confirmed non-functional on Romain's actual
-   hardware (returns a fixed "No MJ stream" error body regardless of
-   config), RTSP confirmed fully functional (real H.264 + audio, verified
-   frame). See "Live API test results (2026-08-14)" above. This one still
-   *does* block moving to implementation of the live-view feature —
-   decision pending with Romain.
+1. **MJPEG vs RTSP-to-HLS** — ~~resolved 2026-08-12 (MJPEG)~~ ~~reopened
+   2026-08-14~~ **resolved 2026-08-15: RTSP-to-HLS via a `go2rtc` relay**,
+   MJPEG ruled out for good (confirmed non-functional on Romain's actual
+   hardware). Still blocks the live-view feature specifically until the
+   prototype in "RTSP-to-HLS relay prototype" above is validated and the
+   sidecar-process capability is proposed to Marc — `camera_snapshot_url`
+   and `camera_detection` are unaffected and can ship independently.
 2. ~~Exact CGI auth requirement per command~~ — **partially resolved**:
    the dedicated non-admin account is sufficient for `getDevState`,
    `snapPicture2`, `getInfraLedConfig`, but **not** for
