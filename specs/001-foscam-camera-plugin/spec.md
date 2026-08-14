@@ -115,36 +115,65 @@ blocker — it's a plain JPEG GET, same shape as Netatmo's.
 *(Superseded 2026-08-15 — see the decision note at the top of this
 section and "RTSP-to-HLS relay prototype" below.)*
 
-## RTSP-to-HLS relay prototype (2026-08-15, in progress)
+## RTSP-to-HLS relay prototype (2026-08-15) — validated end-to-end
 
-Plan for validating option 2 above before proposing the underlying
-capability to Marc:
+Prototype executed on the dev VM the same day the plan was agreed. All
+steps below confirmed working through curl-based testing (not yet tried
+in an actual browser, but the HTTP-level chain a browser/hls.js would
+walk is fully verified):
 
-1. Run `go2rtc` as a sidecar (Docker container to start, for local
-   prototyping on the dev VM — not a production packaging decision yet)
-   pointed at the camera's RTSP URL (`rtsp://<usr>:<pwd>@<ip>:88/videoMain`,
-   confirmed working 2026-08-14).
-2. `go2rtc` remuxes H.264 RTSP into HLS **without re-encoding** (the
-   FI9805E's stream is already H.264 baseline, a codec HLS supports
-   natively — this avoids the CPU cost of a full transcode, unlike a
-   generic `ffmpeg -c:v libx264` pipeline).
-3. Point this plugin's `camera_stream_url` at `go2rtc`'s local HLS
-   endpoint (e.g. `http://127.0.0.1:1984/api/stream.m3u8?src=...`) instead
-   of a direct camera URL.
-4. **Key simplification over the MJPEG path**: if `go2rtc` serves genuine
-   HLS (`#EXTM3U` manifest), Sowel's *existing, unmodified*
-   `src/api/routes/camera.ts` should proxy it correctly — no `unit:
-   "mjpeg"` signal, no auth-middleware query-token exception, no
-   `CameraPanel.tsx` `<img>` branch needed. Those local, not-yet-pushed
-   patches from the MJPEG attempt become unnecessary if this holds; to be
-   confirmed once tested.
-5. The only genuinely new capability needed is Sowel supervising the
-   `go2rtc` process itself (start/stop/health lifecycle) — this is what
-   would need Marc's buy-in as a core change, not the HLS-serving part
-   (already supported).
+1. `go2rtc` run as a Docker sidecar on the dev VM's `sowel_default`
+   network (so it's reachable from the `sowel` container by container
+   name — `127.0.0.1` does **not** work between sibling containers, each
+   has its own network namespace; this cost some early debugging time),
+   pointed at the camera's confirmed-working RTSP URL. Its
+   `/api/stream.m3u8?src=<name>` endpoint returns a genuine two-level HLS
+   structure: a master playlist referencing a variant playlist, itself
+   listing `.ts` segment URIs — remuxed from the camera's native H.264
+   **without re-encoding** (confirmed: `CODECS="avc1.42001E"` in the
+   master, matching the RTSP SDP's `profile-level-id=42001E` from the
+   2026-08-14 test).
+2. The plugin's `camera_stream_url` was pointed at `go2rtc`'s master
+   playlist URL (throwaway local change, not committed — the real
+   integration needs a proper sidecar-lifecycle design, not a hardcoded
+   URL) — with **no** `unit: "mjpeg"` tag, so Sowel's stock HLS-rewrite
+   path runs.
+3. **Master playlist**: Sowel's *existing, unmodified*
+   `src/api/routes/camera.ts` proxied and rewrote it correctly — confirms
+   the "key simplification" hypothesis from the plan: no `unit: "mjpeg"`
+   signal, no auth-middleware query-token exception, no
+   `CameraPanel.tsx` `<img>` branch needed for this path. Those
+   MJPEG-specific local patches are irrelevant to the RTSP-to-HLS
+   approach and can be dropped.
+4. **Variant/child playlist — found and fixed a real gap.** The route
+   comment "a master playlist referencing variant playlists that
+   themselves need rewriting is only rewritten one level deep" turned out
+   to be exactly go2rtc's structure, and it broke exactly as documented:
+   the child playlist's relative `segment.ts?id=...` URIs, unrewritten,
+   would resolve in a browser against the *segment route's own URL*
+   (`.../camera/stream/segment?u=...` → `.../camera/stream/segment.ts?...`),
+   a route that doesn't exist → confirmed 404 by directly requesting that
+   resolved URL. **Fix applied to `src/api/routes/camera.ts`** (local,
+   not yet pushed, on `test/mjpeg-camera-live-view`): the
+   `/camera/stream/segment` route now also passes `rewriteHls: true`,
+   so a child playlist proxied through it gets the same `#EXTM3U`
+   sniff-and-rewrite treatment recursively. Real `.ts`/binary segments
+   never start with `#EXTM3U`, so this is a no-op for them — existing
+   `camera.test.ts` suite still passes (12/12) after the change. This is
+   a generically useful fix, not Foscam-specific — any HLS source with a
+   two-level master/variant structure (fairly common) would have hit the
+   same bug.
+5. **Real segment fetch confirmed**: after the fix, a `.ts` segment
+   fetched through the fully rewritten chain (master → child → segment,
+   all via Sowel's authenticated proxy) returned HTTP 200,
+   `Content-Type: video/mp2t`, ~12.7 KB of real binary MPEG-TS data.
 
-**Not yet done**: none of the steps above have been executed yet — this
-section records the plan agreed with Romain on 2026-08-15, not results.
+**Remaining for a real implementation** (not done): a proper
+sidecar-lifecycle design for `go2rtc` itself (Sowel starting/stopping/
+health-checking the process, not a manually-started test container) —
+this is the actual new capability that needs Marc's buy-in. The HLS
+serving/proxying side is now proven to need only the small, generic
+`camera.ts` recursive-rewrite fix above, not a Foscam-specific hack.
 
 ## Non-Goals
 
