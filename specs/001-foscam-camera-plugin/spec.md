@@ -168,12 +168,71 @@ walk is fully verified):
    all via Sowel's authenticated proxy) returned HTTP 200,
    `Content-Type: video/mp2t`, ~12.7 KB of real binary MPEG-TS data.
 
+### Browser validation (2026-08-15) — three more fixes needed, now confirmed working
+
+The curl-level chain above proved the HTTP plumbing, but the first real
+browser test (`hls.js` via `CameraPanel.tsx`) failed twice more before
+actually working — both root-caused by reproducing them server-side first
+(SSH + a small Node script hitting the same endpoints `hls.js` does),
+rather than guessing from the browser symptom alone:
+
+1. **A live regression in already-shipped code, found along the way.**
+   Making the segment route sniff recursively (fix above) meant it now
+   also sniffs *every* real binary segment passing through it — including
+   Netatmo's, already shipped. The sniff buffered the response via
+   `.text()` (UTF-8 decode) before checking the `#EXTM3U` prefix; a real
+   `.ts` segment can contain byte sequences that aren't valid UTF-8, which
+   `.text()` silently replaces with U+FFFD, corrupting the segment
+   irrecoverably. Fixed by sniffing a raw `Buffer` prefix instead of
+   decoding first — confirmed byte-safe for both cases, existing
+   `camera.test.ts` suite (12/12) still passes.
+2. **`go2rtc`'s HLS session dies ~5s after the last segment fetch** —
+   confirmed by direct measurement against the relay (not documented by
+   `go2rtc` itself): polling only the playlist died in 6-8s; fetching
+   playlist+segments continuously stayed alive past 12s; a warm-up-then-go-quiet
+   test pinned it precisely — 200s until 5s after the last segment pull,
+   404s after. `hls.js`'s default buffering targets ~30s ahead, which on
+   sub-second segments means a burst download followed by a multi-second
+   quiet stretch while it plays through the buffer — comfortably long
+   enough to trip that 5s limit. Fixed (for now) by capping
+   `maxBufferLength`/`maxMaxBufferLength` to 4s in `CameraPanel.tsx`'s
+   `hls.js` init, keeping segment requests frequent enough to never leave
+   that large a gap.
+3. **Sowel's own global rate limit** (`src/api/server.ts`: 300 req/min per
+   IP, sized for the SPA's dashboard-load bursts) — a live HLS view
+   polling multiple times/second blows through that budget within seconds,
+   surfacing as fatal `429`s in the `hls.js` console log (reproduced in
+   both Chrome and Firefox). Fixed by exempting the two camera media-proxy
+   routes (`/camera/stream`, `/camera/stream/segment`) from the global
+   limiter — both are already auth-gated, so this isn't opening an
+   anonymous-abuse vector.
+
+With all three applied, **Romain confirmed the live view actually displays
+in both Chrome and Firefox** — though the `go2rtc` session still
+occasionally dies after ~10s in real playback conditions (the 4s buffer
+cap reduces but doesn't eliminate every gap). Rather than chase that
+further right now, `CameraPanel.tsx` was changed to fail gracefully: a
+fatal `hls.js`/`<video>` error now falls back to the snapshot view
+(`setLive(false)`, same as the user clicking "stop") instead of showing an
+error box on a dead black frame — confirmed clean by Romain in both
+browsers. The underlying session-lifetime mismatch is still open; the real
+fix is Sowel polling `go2rtc` continuously server-side (decoupled from
+whatever the browser's request cadence happens to be), which is part of
+the sidecar-capability conversation below, not a client-side workaround.
+
+All three fixes plus the graceful-fallback change are committed on
+`sowel`'s `test/mjpeg-camera-live-view` branch (pushed to Romain's fork for
+safekeeping, not proposed upstream).
+
 **Remaining for a real implementation** (not done): a proper
 sidecar-lifecycle design for `go2rtc` itself (Sowel starting/stopping/
-health-checking the process, not a manually-started test container) —
-this is the actual new capability that needs Marc's buy-in. The HLS
-serving/proxying side is now proven to need only the small, generic
-`camera.ts` recursive-rewrite fix above, not a Foscam-specific hack.
+health-checking the process, not a manually-started test container) — and,
+per the browser validation above, likely also a continuous server-side
+poll of `go2rtc` decoupled from client request cadence, not just process
+supervision. This is the actual new capability that needs Marc's buy-in,
+not yet proposed. The HLS serving/proxying side itself is now proven to
+need only the small, generic `camera.ts` fixes above, not a Foscam-specific
+hack.
 
 ## Non-Goals
 
@@ -346,22 +405,23 @@ top of "Feasibility risk" above. Decision **pending** as of 2026-08-14.
 
 ## Acceptance Criteria
 
-> **⚠️ Written under the 2026-08-12 MJPEG decision, now reopened (see
-> "Feasibility risk" and "Live API test results (2026-08-14)" above).**
-> Criterion #2 below assumes the MJPEG path and needs to be rewritten once
-> Romain decides how to proceed — left as-is here for the historical
-> record, not to be treated as current until that decision is made.
-
-Finalized 2026-08-12 following the MJPEG-for-v1 decision (see "Feasibility
-risk"):
+> **Updated 2026-08-15** to reflect the RTSP-to-HLS decision (see
+> "Feasibility risk" and "RTSP-to-HLS relay prototype" above), superseding
+> the 2026-08-12 MJPEG-for-v1 version of criterion #2 below.
 
 1. `camera_snapshot_url` fetchable end-to-end through Sowel's media-proxy
    (`GET /api/v1/equipments/:id/camera/snapshot`), backed by `snapPicture2`.
-2. `camera_stream_url` live view works through the MJPEG path
-   (`CGIStream.cgi?cmd=GetMJStream`) — **contingent on the spec 133 UI
-   follow-up PR to `mchacher/sowel` being proposed, reviewed, and merged
-   first**, since `CameraPanel.tsx` cannot currently render MJPEG. This
-   plugin cannot ship a working live view before that PR lands upstream.
+2. `camera_stream_url` live view works through an RTSP-to-HLS relay
+   (`go2rtc`) — **confirmed working end-to-end in a real browser (Chrome
+   and Firefox) against Romain's hardware, 2026-08-15**, on top of three
+   `sowel`-side fixes beyond the recursive-rewrite one from the initial
+   prototype (see "RTSP-to-HLS relay prototype" above for the full list:
+   byte-safe segment proxying, `hls.js` buffer tuning, a media-proxy
+   rate-limit exemption). **Contingent on Sowel gaining a supervised-sidecar
+   capability** (or an equivalent way to run `go2rtc` alongside Sowel) —
+   still not proposed to Marc, see "Remaining for a real implementation".
+   This plugin cannot ship a working live view before that capability
+   exists upstream, tracked separately from this spec.
 3. `camera_detection` surfaced via `getDevState` polling of
    `motionDetectAlarm`, with edge/level de-duplication (no repeat emission
    while the flag stays `true` across polls) — confirmed feasible with the
@@ -401,10 +461,12 @@ Same split as the Netatmo plugin:
 1. **MJPEG vs RTSP-to-HLS** — ~~resolved 2026-08-12 (MJPEG)~~ ~~reopened
    2026-08-14~~ **resolved 2026-08-15: RTSP-to-HLS via a `go2rtc` relay**,
    MJPEG ruled out for good (confirmed non-functional on Romain's actual
-   hardware). Still blocks the live-view feature specifically until the
-   prototype in "RTSP-to-HLS relay prototype" above is validated and the
-   sidecar-process capability is proposed to Marc — `camera_snapshot_url`
-   and `camera_detection` are unaffected and can ship independently.
+   hardware). Prototype **validated end-to-end in a real browser** (see
+   "Browser validation (2026-08-15)" above) — still blocks shipping the
+   live-view feature until the sidecar-process (+ continuous-poll)
+   capability is proposed to and accepted by Marc, not yet done.
+   `camera_snapshot_url` and `camera_detection` are unaffected and can ship
+   independently.
 2. ~~Exact CGI auth requirement per command~~ — **partially resolved**:
    the dedicated non-admin account is sufficient for `getDevState`,
    `snapPicture2`, `getInfraLedConfig`, but **not** for
